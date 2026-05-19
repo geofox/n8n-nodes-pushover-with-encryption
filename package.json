@@ -29,7 +29,6 @@
   "engines": {
     "node": ">=22.16"
   },
-  "main": "index.js",
   "scripts": {
     "build": "tsc && gulp build:icons",
     "dev": "tsc --watch",

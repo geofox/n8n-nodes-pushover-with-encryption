@@ -62,9 +62,16 @@ export function decryptField(payloadBase64: string, keyHex: string): string {
 		throw new PushoverEncryptionError('HMAC validation failed');
 	}
 
-	const decipher = createDecipheriv('aes-256-cbc', key, iv);
-	const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-	return gunzipSync(compressed).toString('utf8');
+	try {
+		const decipher = createDecipheriv('aes-256-cbc', key, iv);
+		const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+		return gunzipSync(compressed).toString('utf8');
+	} catch (err) {
+		// decipher.final() can throw on bad padding; gunzipSync can throw on
+		// non-gzip bytes. Both surface as PushoverEncryptionError so callers
+		// can rely on a single error type.
+		throw new PushoverEncryptionError(`Decryption failed: ${(err as Error).message}`);
+	}
 }
 
 export function generateKeyHex(): string {

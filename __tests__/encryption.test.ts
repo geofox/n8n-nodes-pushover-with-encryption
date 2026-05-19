@@ -1,3 +1,4 @@
+import { createHmac } from 'crypto';
 import {
 	encryptField,
 	decryptField,
@@ -85,5 +86,45 @@ describe('Pushover encryption helper', () => {
 		expect(blob.length).toBeGreaterThanOrEqual(16 + 16 + 32);
 		expect((blob.length - 16 - 32) % 16).toBe(0);
 		expect(blob.subarray(0, 16).equals(FIXED_IV)).toBe(true);
+	});
+
+	test('empty string round-trips through encrypt → decrypt', () => {
+		const ct = encryptField('', KEY);
+		expect(decryptField(ct, KEY)).toBe('');
+	});
+
+	test('decrypt of a MAC-valid but non-gzip ciphertext throws PushoverEncryptionError', () => {
+		// Forge a payload that passes HMAC validation but contains random bytes
+		// in place of a real ciphertext — exercises the decipher/gunzip error
+		// path that previously surfaced as an unwrapped zlib Error.
+		const key = Buffer.from(KEY, 'hex');
+		const iv = Buffer.alloc(16, 0x11);
+		const fakeCiphertext = Buffer.alloc(32, 0x22); // 2 AES blocks of junk
+		const mac = createHmac('sha256', key)
+			.update(Buffer.concat([iv, fakeCiphertext]))
+			.digest();
+		const payload = Buffer.concat([iv, fakeCiphertext, mac]).toString('base64');
+
+		expect(() => decryptField(payload, KEY)).toThrow(PushoverEncryptionError);
+		expect(() => decryptField(payload, KEY)).toThrow(/Decryption failed/);
+	});
+
+	test('gunzip failure surfaces as PushoverEncryptionError, not zlib Error', () => {
+		// Construct a payload that decrypts cleanly (correct AES padding) but
+		// whose decrypted bytes are not a valid gzip stream. We do this by
+		// encrypting a non-gzip buffer with the same AES-CBC step we use
+		// internally, then attaching a correct HMAC.
+		const { createCipheriv } = require('crypto');
+		const key = Buffer.from(KEY, 'hex');
+		const iv = Buffer.alloc(16, 0x33);
+		const cipher = createCipheriv('aes-256-cbc', key, iv);
+		const plaintextNotGzip = Buffer.from('this is plaintext, not gzip\n'.repeat(2));
+		const ct = Buffer.concat([cipher.update(plaintextNotGzip), cipher.final()]);
+		const mac = createHmac('sha256', key)
+			.update(Buffer.concat([iv, ct]))
+			.digest();
+		const payload = Buffer.concat([iv, ct, mac]).toString('base64');
+
+		expect(() => decryptField(payload, KEY)).toThrow(PushoverEncryptionError);
 	});
 });

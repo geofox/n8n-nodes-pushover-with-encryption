@@ -314,9 +314,12 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 	}
 
 	// Promote optional fields up to top-level keys, applying the HTML
-	// boolean → '1'/'' conversion Pushover expects.
-	if (typeof optionalFields.html === 'boolean') {
-		optionalFields.html = optionalFields.html ? '1' : '';
+	// boolean → '1' conversion Pushover expects. We omit the field entirely
+	// when false so we don't ship an empty `html=""` form value.
+	if (optionalFields.html === true) {
+		optionalFields.html = '1';
+	} else {
+		delete optionalFields.html;
 	}
 	Object.assign(body, optionalFields);
 
@@ -348,11 +351,16 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 				{ itemIndex: i },
 			);
 		}
+		// Skip fields that aren't present or are empty — sending an empty
+		// plaintext value alongside encrypted=1 confuses receiving devices
+		// (they try to decrypt the empty string and produce garbage).
+		let anyEncrypted = false;
 		for (const field of encryptFields) {
 			const value = body[field];
 			if (typeof value === 'string' && value.length > 0) {
 				try {
 					body[field] = encryptField(value, keyHex);
+					anyEncrypted = true;
 				} catch (err) {
 					const msg =
 						err instanceof PushoverEncryptionError
@@ -360,9 +368,15 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 							: 'Unexpected error during field encryption';
 					throw new NodeOperationError(ctx.getNode(), msg, { itemIndex: i });
 				}
+			} else if (typeof value === 'string' && value.length === 0) {
+				delete body[field];
 			}
 		}
-		body.encrypted = '1';
+		// Only flip the encrypted flag if we actually produced ciphertext —
+		// otherwise we'd tell Pushover to treat plaintext fields as encrypted.
+		if (anyEncrypted) {
+			body.encrypted = '1';
+		}
 	}
 
 	return body;
