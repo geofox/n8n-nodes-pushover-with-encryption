@@ -1,0 +1,70 @@
+{
+  "name": "@geoffreyr/n8n-nodes-pushover-with-encryption",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "n8n community node for Pushover with optional client-side field encryption (gzip + AES-256-CBC + HMAC-SHA256) per Pushover's encrypted-message spec",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "pushover",
+    "encryption",
+    "aes-256-cbc",
+    "hmac-sha256",
+    "notifications"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/geofox/n8n-nodes-pushover-with-encryption",
+  "author": {
+    "name": "Geoffrey Richard"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geofox/n8n-nodes-pushover-with-encryption.git"
+  },
+  "bugs": {
+    "url": "https://github.com/geofox/n8n-nodes-pushover-with-encryption/issues"
+  },
+  "engines": {
+    "node": ">=20.15"
+  },
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "format": "prettier nodes credentials --write",
+    "lint": "eslint nodes credentials",
+    "lintfix": "eslint nodes credentials --fix",
+    "prepublishOnly": "npm run build && eslint -c .eslintrc.prepublish.js nodes credentials",
+    "test": "jest"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/PushoverWithEncryptionApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Pushover/PushoverWithEncryption.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.30",
+    "@typescript-eslint/parser": "^7.15.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-n8n-nodes-base": "^1.16.3",
+    "gulp": "^5.0.0",
+    "jest": "^29.7.0",
+    "n8n-workflow": "*",
+    "prettier": "^3.3.2",
+    "ts-jest": "^29.1.5",
+    "typescript": "^5.5.3"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

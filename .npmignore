@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+.editorconfig
+.eslintrc.js
+.eslintrc.prepublish.js
+.prettierrc.js
+gulpfile.js
+tsconfig.json
+nodes
+credentials
+__tests__
+coverage
+node_modules
+*.tsbuildinfo
+jest.config.js
