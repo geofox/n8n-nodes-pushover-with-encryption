@@ -109,6 +109,12 @@ describe('Pushover encryption helper', () => {
 		expect(() => decryptField(payload, KEY)).toThrow(/Decryption failed/);
 	});
 
+	test('accepts a key with surrounding whitespace (e.g. trailing newline from openssl)', () => {
+		const padded = `  \n${KEY}\n  `;
+		expect(() => encryptField('hi', padded)).not.toThrow();
+		expect(decryptField(encryptField('hi', padded), padded)).toBe('hi');
+	});
+
 	test('gunzip failure surfaces as PushoverEncryptionError, not zlib Error', () => {
 		// Construct a payload that decrypts cleanly (correct AES padding) but
 		// whose decrypted bytes are not a valid gzip stream. We do this by

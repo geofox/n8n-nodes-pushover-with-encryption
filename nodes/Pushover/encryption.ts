@@ -13,12 +13,16 @@ export class PushoverEncryptionError extends Error {
 }
 
 function parseKey(keyHex: string): Buffer {
-	if (!HEX_KEY_RE.test(keyHex)) {
+	// Trim surrounding whitespace so a trailing newline from `openssl rand
+	// -hex 32` or a stray space pasted into the credential UI doesn't reject
+	// an otherwise-valid key.
+	const trimmed = keyHex.trim();
+	if (!HEX_KEY_RE.test(trimmed)) {
 		throw new PushoverEncryptionError(
 			'Pushover encryption key must be exactly 64 hexadecimal characters (256 bits)',
 		);
 	}
-	return Buffer.from(keyHex, 'hex');
+	return Buffer.from(trimmed, 'hex');
 }
 
 export interface EncryptOptions {
