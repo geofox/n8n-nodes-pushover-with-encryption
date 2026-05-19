@@ -19,6 +19,13 @@ async function request(
 	endpoint: string,
 	body?: IDataObject,
 ): Promise<IDataObject> {
+	// json:true tells n8n's HTTP helper to parse the response as JSON (so we
+	// can pull `response.sounds` etc downstream). The explicit multipart
+	// Content-Type is what Pushover's /messages.json expects, and n8n's
+	// helper preserves it when serializing the body — this matches the
+	// pattern n8n's own built-in Pushover node uses and is confirmed by
+	// live successful sends. Don't drop either without testing both the
+	// plain-message and attachment paths against the live API.
 	const options: IHttpRequestOptions = {
 		method,
 		url: `${BASE_URL}${endpoint}`,
@@ -39,7 +46,20 @@ async function request(
 			options,
 		)) as IDataObject;
 	} catch (err) {
-		throw new NodeApiError(ctx.getNode(), err as JsonObject);
+		// Pre-existing NodeApiError → pass through. Otherwise build one
+		// defensively: HTTP-layer errors are typically IDataObject-shaped
+		// (statusCode, body, etc), but network errors (DNS, timeout) arrive
+		// as plain Error instances without those fields. Casting Error to
+		// JsonObject silently produces a NodeApiError with an empty message,
+		// which surfaces in the UI as "undefined".
+		if (err instanceof NodeApiError) throw err;
+		const node = ctx.getNode();
+		if (err && typeof err === 'object') {
+			throw new NodeApiError(node, err as JsonObject);
+		}
+		throw new NodeApiError(node, {
+			message: err instanceof Error ? err.message : String(err),
+		});
 	}
 }
 
