@@ -321,6 +321,33 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 	} else {
 		delete optionalFields.html;
 	}
+
+	// Pushover's `timestamp` is a Unix epoch in *seconds*, but n8n's dateTime
+	// parameter resolves to an ISO-8601 string (and expressions can yield a
+	// Luxon DateTime). Sending that string makes Pushover reject or ignore the
+	// value, so coerce it here. A bare number or all-digit string is already a
+	// Unix value; anything else is parsed as a date. Empty → drop the field.
+	if ('timestamp' in optionalFields) {
+		const raw = optionalFields.timestamp;
+		if (raw === '' || raw == null) {
+			delete optionalFields.timestamp;
+		} else if (typeof raw === 'number') {
+			optionalFields.timestamp = Math.floor(raw);
+		} else if (/^\d+$/.test(String(raw))) {
+			optionalFields.timestamp = Number(raw);
+		} else {
+			const ms = Date.parse(String(raw));
+			if (Number.isNaN(ms)) {
+				throw new NodeOperationError(
+					ctx.getNode(),
+					`Timestamp "${String(raw)}" is not a valid date or Unix timestamp`,
+					{ itemIndex: i },
+				);
+			}
+			optionalFields.timestamp = Math.floor(ms / 1000);
+		}
+	}
+
 	Object.assign(body, optionalFields);
 
 	// Attachment lives in a fixedCollection wrapper; unwrap it into the
