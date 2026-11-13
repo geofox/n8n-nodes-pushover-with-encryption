@@ -32,16 +32,21 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # The lockfile is written by npm 11 (Node.js 24+, Dependabot). Node.js
+      # 22 bundles npm 10, which rejects some npm 11 lockfiles in `npm ci`.
+      - if: matrix.node == '22.x'
+        run: npm install --global npm@11
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
 
-  n8n-v3:
-    # Type-checks and tests the node against the n8n 3.x workflow library so
-    # API changes in n8n 3 show up here before users hit them.
-    name: n8n 3 compatibility
+  n8n-v2:
+    # The project builds against the n8n 3.x workflow library. Most installs
+    # still run n8n 2.x, so also type-check and test against 2.x to keep the
+    # node compatible with both.
+    name: n8n 2 compatibility
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,13 +57,16 @@ jobs:
           node-version: 'lts/*'
           cache: npm
       - run: npm ci
-      - run: npm install --no-save 'n8n-workflow@^3'
-      # `npm ls` would flag the swapped-in 3.x as outside the declared
-      # ^2 range, so check the installed version directly instead.
-      - name: Confirm n8n-workflow 3.x is installed
+      # Not plain ^2: n8n-workflow's stale `latest` dist-tag (2.16.0) satisfies
+      # ^2, so npm would install that old release, whose isolated-vm 6.x does
+      # not build on current Node.js. ^2.47.2 resolves to the newest 2.x.
+      - run: npm install --no-save 'n8n-workflow@^2.47.2'
+      # `npm ls` would flag the swapped-in 2.x as outside the declared
+      # ^3 range, so check the installed version directly instead.
+      - name: Confirm n8n-workflow 2.x is installed
         run: >-
           node -e "const v = require('n8n-workflow/package.json').version;
           console.log('n8n-workflow', v);
-          if (!v.startsWith('3.')) { console.error('expected n8n-workflow 3.x'); process.exit(1); }"
+          if (!v.startsWith('2.')) { console.error('expected n8n-workflow 2.x'); process.exit(1); }"
       - run: npm run typecheck
       - run: npm test

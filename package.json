@@ -56,12 +56,12 @@
     ]
   },
   "devDependencies": {
-    "@n8n/node-cli": "^0.56.4",
+    "@n8n/node-cli": "^1.2.1",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.20.5",
     "eslint": "^9.39.5",
     "jest": "^30.5.2",
-    "n8n-workflow": "^2.47.2",
+    "n8n-workflow": "^3.2.1",
     "prettier": "^3.10.1",
     "release-it": "^21.1.2",
     "ts-jest": "^29.4.15",
