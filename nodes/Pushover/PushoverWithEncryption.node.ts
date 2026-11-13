@@ -2,21 +2,38 @@ import type {
 	IDataObject,
 	IExecuteFunctions,
 	ILoadOptionsFunctions,
+	INode,
 	INodeExecutionData,
 	INodePropertyOptions,
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 import { encryptField, PushoverEncryptionError } from './encryption';
-import { listSounds, sendMessage } from './pushoverClient';
+import type { PushoverAttachment } from './pushoverClient';
+import { CREDENTIAL_NAME, listSounds, sendMessage } from './pushoverClient';
 
 // Fields whose plaintext can be replaced with a Pushover-encrypted ciphertext
 // before the request leaves this node. Attachments are explicitly not in this
 // set: Pushover's encryption spec covers text form fields only.
 const ENCRYPTABLE_FIELDS = ['message', 'title', 'url', 'url_title'] as const;
 type EncryptableField = (typeof ENCRYPTABLE_FIELDS)[number];
+
+// `encryptFields` can be set from an expression, so treat it as untrusted:
+// only the four text fields above may ever be replaced with ciphertext.
+const isEncryptableField = (value: unknown): value is EncryptableField =>
+	(ENCRYPTABLE_FIELDS as readonly unknown[]).includes(value);
+
+interface PushoverCredentials {
+	apiKey: string;
+	encryptionKey?: string;
+}
+
+interface PushoverMessage {
+	fields: IDataObject;
+	attachment?: PushoverAttachment;
+}
 
 // Pushover priority levels are documented as integers from -2 to 2 with
 // specific semantics. We keep the semantic ordering rather than the lint
@@ -33,7 +50,9 @@ export class PushoverWithEncryption implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Pushover (with Encryption)',
 		name: 'pushoverWithEncryption',
-		icon: 'file:pushover.svg',
+		// The mark is a solid disc with a white glyph, so one file reads well
+		// on both the light and the dark canvas.
+		icon: { light: 'file:../../icons/pushover.svg', dark: 'file:../../icons/pushover.svg' },
 		group: ['output'],
 		version: 1,
 		subtitle: '={{$parameter["operation"]}}',
@@ -43,11 +62,11 @@ export class PushoverWithEncryption implements INodeType {
 			name: 'Pushover (with Encryption)',
 		},
 		usableAsTool: true,
-		inputs: ['main'],
-		outputs: ['main'],
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
-				name: 'pushoverWithEncryptionApi',
+				name: CREDENTIAL_NAME,
 				required: true,
 			},
 		],
@@ -98,7 +117,6 @@ export class PushoverWithEncryption implements INodeType {
 				displayName: 'Priority',
 				name: 'priority',
 				type: 'options',
-				// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items
 				options: PRIORITY_OPTIONS,
 				default: 0,
 				description: 'Pushover priority level. Emergency (2) requires Retry and Expire to be set.',
@@ -130,7 +148,8 @@ export class PushoverWithEncryption implements INodeType {
 				typeOptions: { minValue: 0, maxValue: 10800 },
 				required: true,
 				default: 1800,
-				description: 'For Emergency priority: how long retries continue before giving up (max 10800)',
+				description:
+					'For Emergency priority: how long retries continue before giving up (max 10800)',
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -231,7 +250,8 @@ export class PushoverWithEncryption implements INodeType {
 						name: 'ttl',
 						type: 'number',
 						default: 0,
-						description: 'After this many seconds the message is auto-deleted from devices. 0 = never.',
+						description:
+							'After this many seconds the message is auto-deleted from devices. 0 = never.',
 					},
 					{
 						displayName: 'URL',
@@ -272,22 +292,26 @@ export class PushoverWithEncryption implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const body = await buildRequestBody(this, i);
-				const response = await sendMessage(this, body);
-				const meta = this.helpers.constructExecutionMetaData(this.helpers.returnJsonArray(response), {
-					itemData: { item: i },
-				});
+				const credentials = await this.getCredentials<PushoverCredentials>(CREDENTIAL_NAME, i);
+				const { fields, attachment } = await buildMessage(this, i, credentials);
+				const response = await sendMessage(this, fields, credentials.apiKey, attachment);
+				const meta = this.helpers.constructExecutionMetaData(
+					this.helpers.returnJsonArray(response),
+					{
+						itemData: { item: i },
+					},
+				);
 				out.push(...meta);
-			} catch (err) {
+			} catch (error) {
 				if (this.continueOnFail()) {
 					const meta = this.helpers.constructExecutionMetaData(
-						this.helpers.returnJsonArray({ error: (err as Error).message }),
+						this.helpers.returnJsonArray({ error: (error as Error).message }),
 						{ itemData: { item: i } },
 					);
 					out.push(...meta);
 					continue;
 				}
-				throw err;
+				throw toNodeError(this.getNode(), error, i);
 			}
 		}
 
@@ -295,11 +319,29 @@ export class PushoverWithEncryption implements INodeType {
 	}
 }
 
-async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDataObject> {
+// Surface every failure as an n8n error tied to the failing item. API errors
+// from n8n's HTTP helper are already NodeApiError (status code, Pushover's
+// error payload) and are kept as they are; NodeOperationError returns an
+// existing NodeOperationError unchanged; anything else gets wrapped.
+function toNodeError(node: INode, error: unknown, itemIndex: number) {
+	if (error instanceof NodeApiError) {
+		error.context.itemIndex = itemIndex;
+		return error;
+	}
+	return new NodeOperationError(node, error as Error, { itemIndex });
+}
+
+async function buildMessage(
+	ctx: IExecuteFunctions,
+	i: number,
+	credentials: PushoverCredentials,
+): Promise<PushoverMessage> {
 	const userKey = ctx.getNodeParameter('userKey', i) as string;
 	const message = ctx.getNodeParameter('message', i) as string;
 	const priority = ctx.getNodeParameter('priority', i) as number;
-	const encryptFields = ctx.getNodeParameter('encryptFields', i, []) as EncryptableField[];
+	const encryptFields = (ctx.getNodeParameter('encryptFields', i, []) as unknown[]).filter(
+		isEncryptableField,
+	);
 	const optionalFields = ctx.getNodeParameter('optionalFields', i, {}) as IDataObject;
 
 	const body: IDataObject = {
@@ -350,17 +392,18 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 
 	Object.assign(body, optionalFields);
 
-	// Attachment lives in a fixedCollection wrapper; unwrap it into the
-	// `attachment` field Pushover expects (a Buffer with filename metadata).
+	// Attachment lives in a fixedCollection wrapper; unwrap it into the binary
+	// file part Pushover expects as `attachment`.
+	let attachment: PushoverAttachment | undefined;
 	if (body.attachmentsUi) {
 		const wrap = (body.attachmentsUi as IDataObject).attachment as IDataObject | undefined;
 		if (wrap?.binaryPropertyName) {
 			const propName = wrap.binaryPropertyName as string;
 			const binaryMeta = ctx.helpers.assertBinaryData(i, propName);
-			const buffer = await ctx.helpers.getBinaryDataBuffer(i, propName);
-			body.attachment = {
-				value: buffer,
-				options: { filename: binaryMeta.fileName },
+			attachment = {
+				data: await ctx.helpers.getBinaryDataBuffer(i, propName),
+				fileName: binaryMeta.fileName,
+				mimeType: binaryMeta.mimeType,
 			};
 		}
 		delete body.attachmentsUi;
@@ -369,8 +412,7 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 	// Encryption is applied last so it sees the final plaintext for every
 	// field, including ones merged from optionalFields.
 	if (encryptFields.length > 0) {
-		const credentials = await ctx.getCredentials('pushoverWithEncryptionApi');
-		const keyHex = (credentials.encryptionKey as string | undefined)?.trim();
+		const keyHex = credentials.encryptionKey?.trim();
 		if (!keyHex) {
 			throw new NodeOperationError(
 				ctx.getNode(),
@@ -386,12 +428,12 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 			const value = body[field];
 			if (typeof value === 'string' && value.length > 0) {
 				try {
-					body[field] = encryptField(value, keyHex);
+					body[field] = await encryptField(value, keyHex);
 					anyEncrypted = true;
-				} catch (err) {
+				} catch (error) {
 					const msg =
-						err instanceof PushoverEncryptionError
-							? err.message
+						error instanceof PushoverEncryptionError
+							? error.message
 							: 'Unexpected error during field encryption';
 					throw new NodeOperationError(ctx.getNode(), msg, { itemIndex: i });
 				}
@@ -406,5 +448,5 @@ async function buildRequestBody(ctx: IExecuteFunctions, i: number): Promise<IDat
 		}
 	}
 
-	return body;
+	return { fields: body, attachment };
 }

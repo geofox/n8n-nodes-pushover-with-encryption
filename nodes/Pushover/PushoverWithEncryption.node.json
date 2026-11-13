@@ -1,5 +1,5 @@
 {
-	"node": "n8n-nodes-base.pushoverWithEncryption",
+	"node": "@geoffreyr/n8n-nodes-pushover-with-encryption.pushoverWithEncryption",
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Communication"],

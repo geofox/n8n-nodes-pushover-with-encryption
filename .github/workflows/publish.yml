@@ -1,0 +1,64 @@
+# Publishes the package to npm, with an npm provenance attestation, when a
+# version tag (vX.Y.Z) is pushed.
+#
+# n8n requires community nodes to be published from GitHub Actions with npm
+# provenance (since 1 May 2026). Provenance lets anyone verify that a release
+# was built by this workflow, from this repository and commit.
+#
+# Cutting a release (locally, on an up-to-date `main`):
+#
+#   npm run release
+#
+# `n8n-node release` runs release-it: it lints and builds, bumps the version,
+# updates CHANGELOG.md, then commits, tags (vX.Y.Z) and pushes. It does not
+# publish; pushing the tag runs this workflow, which does.
+#
+# One-time setup on npmjs.com (recommended, no long-lived secret):
+#   Package settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user: geofox
+#     Repository:           n8n-nodes-pushover-with-encryption
+#     Workflow filename:    publish.yml
+#   and allow publishing with `npm publish` for that trusted publisher.
+# Fallback: a granular npm access token for this package stored as the
+# NPM_TOKEN repository secret.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC token for npm trusted publishing and the provenance attestation.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Trusted publishing needs npm >= 11.5.1, which ships with Node.js 24+.
+          node-version: 'lts/*'
+          # No dependency cache in release builds.
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Publish with provenance
+        # In CI, `n8n-node release` lints, builds and runs `npm publish` with
+        # NPM_CONFIG_PROVENANCE=true. The token line only runs when the
+        # NPM_TOKEN fallback secret is set; otherwise npm uses OIDC.
+        run: |
+          [ -n "$NPM_TOKEN" ] && npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          npm run release
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
