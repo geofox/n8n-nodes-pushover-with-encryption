@@ -53,6 +53,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm install --no-save 'n8n-workflow@^3'
-      - run: npm ls n8n-workflow --depth=0
+      # `npm ls` would flag the swapped-in 3.x as outside the declared
+      # ^2 range, so check the installed version directly instead.
+      - name: Confirm n8n-workflow 3.x is installed
+        run: >-
+          node -e "const v = require('n8n-workflow/package.json').version;
+          console.log('n8n-workflow', v);
+          if (!v.startsWith('3.')) { console.error('expected n8n-workflow 3.x'); process.exit(1); }"
       - run: npm run typecheck
       - run: npm test
