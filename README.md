@@ -11,16 +11,27 @@ A drop-in alternative to the built-in **Pushover** node, with one extra control:
 - ✅ Same operations and parameters as the built-in Pushover node
 - ✅ Per-field encryption toggle for `title`, `message`, `url`, `url_title`
 - ✅ All four toggles default to ON — encryption is opt-out, not opt-in
-- ✅ Pure Node.js `crypto` + `zlib` — no native deps
+- ✅ No runtime dependencies: Node.js `crypto` plus the standard Compression
+  Streams API, within n8n's community-node rules (including the n8n Cloud ones)
 - ✅ Sets `encrypted=1` automatically when at least one field is encrypted
 - ✅ Constant-time HMAC verification on the round-trip helper
+
+## Compatibility
+
+- **n8n 1.85.0 or newer**, including n8n 2.x and n8n 3. The node is
+  type-checked and tested against both the n8n 2.x and the n8n 3.x workflow
+  libraries in CI.
+- **n8n 3:** this package is not a verified community node. n8n 3.0 changes
+  the default of `N8N_UNVERIFIED_PACKAGES_ENABLED` to `false`, which stops
+  unverified community packages from loading. Set
+  `N8N_UNVERIFIED_PACKAGES_ENABLED=true` on n8n 3 instances that use this node.
 
 ## Install
 
 In your n8n instance:
 
-1. Set `N8N_COMMUNITY_PACKAGES_ENABLED=true` in the environment of your n8n
-   container (already required for any community node).
+1. Make sure community packages are enabled (`N8N_COMMUNITY_PACKAGES_ENABLED`,
+   on by default) and, on n8n 3, see [Compatibility](#compatibility).
 2. Open **Settings → Community Nodes → Install**.
 3. Enter `@geoffreyr/n8n-nodes-pushover-with-encryption` and confirm.
 
@@ -38,10 +49,10 @@ node picker.
 
 Create a credential of type **Pushover (with Encryption) API**:
 
-| Field              | Required | What it is                                                                                                              |
-| ------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **API Token**      | yes      | Your Pushover application token (`APP_TOKEN`), created from the Pushover dashboard.                                     |
-| **Encryption Key** | optional | A 64-character hexadecimal key (256 bits) used for client-side encryption. Must match the key configured in your apps. |
+| Field                    | Required | What it is                                                                                                             |
+| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Application Token**    | yes      | Your Pushover application token (`APP_TOKEN`), created from the Pushover dashboard.                                    |
+| **Encryption Key (Hex)** | optional | A 64-character hexadecimal key (256 bits) used for client-side encryption. Must match the key configured in your apps. |
 
 ### Generating an encryption key
 
@@ -59,7 +70,7 @@ relays the opaque ciphertext.
 Each selected field is encrypted independently per Pushover's spec:
 
 1. UTF-8 encode the plaintext
-2. GZIP-compress (level 9)
+2. GZIP-compress (a standard RFC 1952 gzip stream)
 3. Generate a random 16-byte IV
 4. AES-256-CBC encrypt (PKCS7 padding) the compressed bytes
 5. Compute HMAC-SHA256 over `IV ‖ ciphertext` with the same key
@@ -91,8 +102,11 @@ curl -s https://api.pushover.net/1/messages.json \
   -F "encrypted=1"
 ```
 
-This community node produces byte-identical output to the shell snippet above,
-modulo the random IV.
+The node and the shell snippet above are interoperable: each decrypts the
+other's output. The test suite includes known-answer vectors produced by
+exactly this pipeline (`gzip -9` and OpenSSL), and the node's own ciphertext
+decrypts with `openssl enc -d` and `gunzip`. The bytes are not identical even
+with the same IV, because the node compresses with zlib's default level.
 
 ## Usage
 
@@ -117,14 +131,38 @@ If you want lockscreen previews of the title but encrypt the body, deselect
 
 ## Development
 
+Requires Node.js 22.16 or newer; n8n itself needs Node.js 24 or newer, so use
+that for `npm run dev`. The tooling is n8n's official
+[`@n8n/node-cli`](https://www.npmjs.com/package/@n8n/node-cli) (`n8n-node`).
+
 ```bash
 git clone https://github.com/geofox/n8n-nodes-pushover-with-encryption.git
 cd n8n-nodes-pushover-with-encryption
-npm install
-npm run build       # tsc + gulp icons
-npm run lint        # eslint with n8n community ruleset
-npm test            # jest on the encryption helper
+npm ci
+npm run build       # n8n-node build: compile and copy the icon into dist/
+npm run lint        # n8n-node lint: n8n's community-node rules, strict mode
+npm run typecheck   # TypeScript check of sources and tests
+npm test            # Jest: encryption helper and node behaviour
+npm run dev         # n8n-node dev: run n8n locally with this node loaded
 ```
+
+`npm run lint` runs in strict mode (`"strict": true` in `package.json`), so
+`eslint.config.mjs` must stay identical to the default that `n8n-node`
+generates.
+
+## Releasing
+
+Releases are published from GitHub Actions with an npm provenance attestation,
+which n8n requires for community nodes:
+
+1. On an up-to-date `main`, run `npm run release`. It lints, builds, bumps the
+   version, updates `CHANGELOG.md`, commits, tags `vX.Y.Z` and pushes.
+2. The tag push runs [`publish.yml`](.github/workflows/publish.yml), which
+   tests and publishes the package with provenance.
+
+One-time setup: configure npm Trusted Publishing for this repository and
+`publish.yml` (or add an `NPM_TOKEN` repository secret). The workflow file
+describes both options.
 
 ## License
 
