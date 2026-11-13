@@ -158,7 +158,9 @@ which n8n requires for community nodes:
 1. On an up-to-date `main`, run `npm run release`. It lints, builds, bumps the
    version, updates `CHANGELOG.md`, commits, tags `vX.Y.Z` and pushes.
 2. The tag push runs [`publish.yml`](.github/workflows/publish.yml), which
-   tests and publishes the package with provenance.
+   tests and publishes the package with provenance. If a tag was created
+   another way (for example from the GitHub Releases page) and the workflow
+   did not start, run **Publish** manually from the Actions tab on that tag.
 
 One-time setup: configure npm Trusted Publishing for this repository and
 `publish.yml` (or add an `NPM_TOKEN` repository secret). The workflow file
