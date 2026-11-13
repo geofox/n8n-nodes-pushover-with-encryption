@@ -131,9 +131,12 @@ If you want lockscreen previews of the title but encrypt the body, deselect
 
 ## Development
 
-Requires Node.js 22.16 or newer; n8n itself needs Node.js 24 or newer, so use
-that for `npm run dev`. The tooling is n8n's official
-[`@n8n/node-cli`](https://www.npmjs.com/package/@n8n/node-cli) (`n8n-node`).
+Use Node.js 24 or newer (n8n's own minimum), or Node.js 22.16+ with npm 11
+(`npm install --global npm@11`): the lockfile is written by npm 11, and the
+npm 10 that ships with Node.js 22 can reject it in `npm ci`. The tooling is
+n8n's official [`@n8n/node-cli`](https://www.npmjs.com/package/@n8n/node-cli)
+(`n8n-node`); `npm run dev` runs n8n in a container, so it needs Docker or
+Podman.
 
 ```bash
 git clone https://github.com/geofox/n8n-nodes-pushover-with-encryption.git
@@ -143,7 +146,7 @@ npm run build       # n8n-node build: compile and copy the icon into dist/
 npm run lint        # n8n-node lint: n8n's community-node rules, strict mode
 npm run typecheck   # TypeScript check of sources and tests
 npm test            # Jest: encryption helper and node behaviour
-npm run dev         # n8n-node dev: run n8n locally with this node loaded
+npm run dev         # n8n-node dev: n8n in Docker/Podman with this node loaded
 ```
 
 `npm run lint` runs in strict mode (`"strict": true` in `package.json`), so
