@@ -1,20 +1,23 @@
 # n8n-nodes-pushover-with-encryption
 
 An n8n community node that sends [Pushover](https://pushover.net/) notifications
-**with optional client-side field encryption** per Pushover's
-[encrypted-message specification](https://pushover.net/api#encrypted)
+**with optional end-to-end encryption** per Pushover's
+[end-to-end encryption specification](https://pushover.net/api#e2ee)
 (gzip → AES-256-CBC → HMAC-SHA256).
 
 A drop-in alternative to the built-in **Pushover** node, with one extra control:
 **Encrypt Fields**.
 
 - ✅ Same operations and parameters as the built-in Pushover node
-- ✅ Per-field encryption toggle for `title`, `message`, `url`, `url_title`
-- ✅ All four toggles default to ON — encryption is opt-out, not opt-in
+- ✅ Encrypts `message`, `title`, `url` and `url_title`, the four fields
+  Pushover's end-to-end encryption covers
+- ✅ Encryption is on by default (opt-out, not opt-in), and fails closed: the
+  node refuses to send rather than fall back to plaintext (see
+  [Security](#security))
 - ✅ No runtime dependencies: Node.js `crypto` plus the standard Compression
   Streams API, within n8n's community-node rules (including the n8n Cloud ones)
 - ✅ Sets `encrypted=1` automatically when at least one field is encrypted
-- ✅ Constant-time HMAC verification on the round-trip helper
+- ✅ Interoperable with Pushover's reference OpenSSL implementation, both ways
 
 ## Compatibility
 
@@ -49,10 +52,15 @@ node picker.
 
 Create a credential of type **Pushover (with Encryption) API**:
 
-| Field                    | Required | What it is                                                                                                             |
-| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| **Application Token**    | yes      | Your Pushover application token (`APP_TOKEN`), created from the Pushover dashboard.                                    |
-| **Encryption Key (Hex)** | optional | A 64-character hexadecimal key (256 bits) used for client-side encryption. Must match the key configured in your apps. |
+| Field                    | Required | What it is                                                                                                            |
+| ------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| **Application Token**    | yes      | Your Pushover application token (`APP_TOKEN`), created from the Pushover dashboard.                                   |
+| **Encryption Key (Hex)** | optional | A 64-character hexadecimal key (256 bits) used for end-to-end encryption. Must match the key configured in your apps. |
+
+Only this node can use the credential: n8n refuses it to every other node,
+including the **HTTP Request** node. This keeps anyone who may _use_ a shared
+credential from sending the token to a server of their choice. n8n versions
+that predate this restriction ignore it.
 
 ### Generating an encryption key
 
@@ -61,13 +69,15 @@ Create a credential of type **Pushover (with Encryption) API**:
 openssl rand -hex 32
 ```
 
-You configure the same hex key in your Pushover apps (iOS / Android / Desktop)
-under the encryption setting. Pushover's server never sees the key — it only
-relays the opaque ciphertext.
+Configure the same hex key in the Pushover apps that should decrypt your
+messages (Pushover's [iOS and Android apps](https://pushover.net/api#e2ee)
+support end-to-end encryption). Pushover's servers never see the key; they
+only relay the opaque ciphertext.
 
 ## Encryption details
 
-Each selected field is encrypted independently per Pushover's spec:
+Each selected field is encrypted independently per
+[Pushover's spec](https://pushover.net/api#e2ee):
 
 1. UTF-8 encode the plaintext
 2. GZIP-compress (a standard RFC 1952 gzip stream)
@@ -78,6 +88,17 @@ Each selected field is encrypted independently per Pushover's spec:
 
 When at least one field is encrypted, the node sets `encrypted=1` on the
 multipart POST so Pushover knows to forward the opaque payload to your devices.
+
+With `encrypted=1`, Pushover's spec treats `message`, `title`, `url` and
+`url_title` as encrypted. Two consequences:
+
+- **Keep all four fields selected under Encrypt Fields.** A field sent in
+  plaintext next to encrypted ones may not display correctly on the device.
+  To send an unencrypted message, deselect all four.
+- **An encrypted message always has a title.** Without one, Pushover fills in
+  the application name in plaintext, which the apps then try, and fail, to
+  decrypt. The node sends an encrypted `n8n` title instead. Set **Title** to
+  choose your own.
 
 ### Worked example (shell)
 
@@ -102,32 +123,78 @@ curl -s https://api.pushover.net/1/messages.json \
   -F "encrypted=1"
 ```
 
-The node and the shell snippet above are interoperable: each decrypts the
-other's output. The test suite includes known-answer vectors produced by
-exactly this pipeline (`gzip -9` and OpenSSL), and the node's own ciphertext
-decrypts with `openssl enc -d` and `gunzip`. The bytes are not identical even
-with the same IV, because the node compresses with zlib's default level.
+This is Pushover's own example. The node and the snippet are interoperable:
+each decrypts the other's output. The test suite includes known-answer vectors
+produced by exactly this pipeline (`gzip -9` and OpenSSL), and the node's own
+ciphertext decrypts with `openssl enc -d` and `gunzip`. The bytes are not
+identical even with the same IV, because the node compresses with zlib's
+default level.
 
 ## Usage
 
 1. Add a **Pushover (with Encryption)** node to your workflow.
 2. Pick the **Pushover (with Encryption) API** credential.
-3. Fill in **User Key**, **Message**, and optional fields.
-4. Under **Encrypt Fields**, deselect anything you want sent in plaintext.
-   All four are pre-selected.
+3. Fill in **User or Group Key**, **Message**, and optional fields.
+4. Leave all four **Encrypt Fields** selected (the default), or deselect all
+   of them to send the message unencrypted.
 5. Run.
 
-If you want lockscreen previews of the title but encrypt the body, deselect
-**Title** from **Encrypt Fields**.
+The node's subtitle on the canvas shows whether it sends encrypted messages.
 
 ## Limitations
 
-- **Attachments are not encrypted.** Pushover's spec covers form fields only;
-  binary attachments travel as-is.
-- **Server-side validation runs on the ciphertext.** Length limits still apply
-  to the encrypted form-field values, not to the plaintext.
+- **Only four fields are encrypted.** Pushover's spec covers `message`,
+  `title`, `url` and `url_title`. The user key, device, priority, sound,
+  timestamp, TTL, HTML flag and attachments travel in plaintext (over HTTPS)
+  and are visible to Pushover.
+- **Length limits.** Pushover documents its limits for the text you write:
+  1024 characters for the message, 250 for the title, 512 for the URL and 100
+  for the URL title. It does not say how it applies them to encrypted values,
+  which are always longer (even a 1-character URL title is 108 characters once
+  encrypted). Keep the plaintext within the limits.
 - **No key rotation built in.** If you rotate the device-side key, you must
   update the credential at the same time. There's no per-message key id.
+
+## Security
+
+What the encryption protects, and what it does not:
+
+- **Protected:** the content of the four encrypted fields, from Pushover and
+  from Apple's and Google's push services.
+- **Not protected:** everything else Pushover needs or receives (see
+  [Limitations](#limitations)), plus the size and timing of each message.
+- **Properties of Pushover's scheme,** which the node cannot change without
+  breaking compatibility with the apps:
+  - The same key is used for AES and for HMAC. This departs from the usual
+    practice of separate keys, though no practical attack on this
+    encrypt-then-MAC construction is known.
+  - The plaintext is compressed before it is encrypted, so the length of the
+    ciphertext depends on the content. Avoid putting a secret and text an
+    attacker controls in the same field, where the size of messages could
+    reveal the secret, as in the CRIME and BREACH attacks.
+  - Each field is authenticated on its own, not as part of a message.
+    Whoever relays messages could swap encrypted fields between messages, or
+    replay an old one, without the apps noticing.
+
+How the node handles failures:
+
+- **It fails closed.** An item fails, and nothing is sent, if **Encrypt
+  Fields** asks for encryption and the credential has no key or an invalid
+  one, or if **Encrypt Fields** (for example from an expression, or from an AI
+  agent when the node runs as a tool) contains anything other than
+  `message`, `title`, `url` or `url_title`. Values that are not text, such as
+  a number from an expression, are encrypted like any other text.
+- **The application token stays out of URLs.** Messages are sent as a
+  multipart POST with the token in the body. The read-only endpoints (the
+  sound list and the credential test) take it in the query string, as
+  Pushover's API requires.
+- **It stops early on account-wide refusals.** With **Continue On Fail**
+  set, once Pushover rejects the token or reports the monthly quota used up,
+  the remaining items are marked as not sent instead of being sent anyway.
+  Pushover temporarily blocks IP addresses that keep sending failing
+  requests.
+- **As an AI agent tool,** do not let the model choose **Encrypt Fields**:
+  an empty selection legitimately sends a plaintext message.
 
 ## Development
 
@@ -143,7 +210,7 @@ git clone https://github.com/geofox/n8n-nodes-pushover-with-encryption.git
 cd n8n-nodes-pushover-with-encryption
 npm ci
 npm run build       # n8n-node build: compile and copy the icon into dist/
-npm run lint        # n8n-node lint: n8n's community-node rules, strict mode
+npm run lint        # n8n-node lint: n8n's community-node rules, strict mode (ESLint 10)
 npm run typecheck   # TypeScript check of sources and tests
 npm test            # Jest: encryption helper and node behaviour
 npm run dev         # n8n-node dev: n8n in Docker/Podman with this node loaded
