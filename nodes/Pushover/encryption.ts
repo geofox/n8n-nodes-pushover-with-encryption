@@ -11,10 +11,12 @@ export class PushoverEncryptionError extends Error {
 	}
 }
 
+// Surrounding whitespace is ignored so a trailing newline from `openssl rand
+// -hex 32` or a stray space pasted into the credential UI doesn't reject an
+// otherwise-valid key.
+export const isValidKeyHex = (keyHex: string): boolean => HEX_KEY_RE.test(keyHex.trim());
+
 function parseKey(keyHex: string): Buffer {
-	// Trim surrounding whitespace so a trailing newline from `openssl rand
-	// -hex 32` or a stray space pasted into the credential UI doesn't reject
-	// an otherwise-valid key.
 	const trimmed = keyHex.trim();
 	if (!HEX_KEY_RE.test(trimmed)) {
 		throw new PushoverEncryptionError(
@@ -56,9 +58,9 @@ export async function encryptField(
 	const cipher = createCipheriv('aes-256-cbc', key, iv);
 	const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
 
-	const hmac = createHmac('sha256', key)
-		.update(Buffer.concat([iv, ciphertext]))
-		.digest();
+	// Encrypt-then-MAC over IV ‖ ciphertext. Pushover's spec uses the same
+	// key for AES and HMAC; that cannot change without breaking its apps.
+	const hmac = createHmac('sha256', key).update(iv).update(ciphertext).digest();
 
 	return Buffer.concat([iv, ciphertext, hmac]).toString('base64');
 }
@@ -83,9 +85,7 @@ export async function decryptField(payloadBase64: string, keyHex: string): Promi
 	const ciphertext = blob.subarray(IV_LEN, blob.length - HMAC_LEN);
 	const providedMac = blob.subarray(blob.length - HMAC_LEN);
 
-	const expectedMac = createHmac('sha256', key)
-		.update(Buffer.concat([iv, ciphertext]))
-		.digest();
+	const expectedMac = createHmac('sha256', key).update(iv).update(ciphertext).digest();
 
 	if (!timingSafeEqual(expectedMac, providedMac)) {
 		throw new PushoverEncryptionError('HMAC validation failed');

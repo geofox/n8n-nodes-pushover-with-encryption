@@ -3,6 +3,7 @@ import {
 	encryptField,
 	decryptField,
 	generateKeyHex,
+	isValidKeyHex,
 	PushoverEncryptionError,
 } from '../nodes/Pushover/encryption';
 
@@ -89,6 +90,16 @@ describe('Pushover encryption helper', () => {
 		await expect(encryptField('x', 'tooshort')).rejects.toThrow(PushoverEncryptionError);
 		await expect(encryptField('x', 'z'.repeat(64))).rejects.toThrow(PushoverEncryptionError);
 		await expect(encryptField('x', 'a'.repeat(63))).rejects.toThrow(PushoverEncryptionError);
+	});
+
+	test('isValidKeyHex accepts exactly 64 hex characters, ignoring surrounding whitespace', () => {
+		expect(isValidKeyHex(KEY)).toBe(true);
+		expect(isValidKeyHex(`  ${KEY.toUpperCase()}\n`)).toBe(true);
+		expect(isValidKeyHex('')).toBe(false);
+		expect(isValidKeyHex('a'.repeat(63))).toBe(false);
+		expect(isValidKeyHex('a'.repeat(65))).toBe(false);
+		expect(isValidKeyHex('g'.repeat(64))).toBe(false);
+		expect(isValidKeyHex(`${'a'.repeat(32)} ${'a'.repeat(32)}`)).toBe(false);
 	});
 
 	test('rejects an IV that is not exactly 16 bytes', async () => {

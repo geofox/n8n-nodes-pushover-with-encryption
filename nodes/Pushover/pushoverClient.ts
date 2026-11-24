@@ -23,18 +23,9 @@ export interface PushoverAttachment {
 // Pushover's /messages.json takes a multipart/form-data POST. The body is a
 // WHATWG FormData (a Node.js global, so no runtime dependency), which n8n's
 // HTTP helper hands to axios as-is and axios streams with a proper boundary.
-//
-// The application token is appended here on purpose: n8n applies a
-// `generic` credential by assigning `body[key] = value`, which turns into a
-// form field for a plain-object body but only sets an inert JS property on a
-// FormData instance. The credential still adds `token` to the query string,
-// so the request carries it in both places, exactly as the previous
-// request-library based implementation did.
-export function toMultipartBody(
-	fields: IDataObject,
-	token: string,
-	attachment?: PushoverAttachment,
-): FormData {
+// The application token is not added here: the credential's `authenticate`
+// method appends it to the form body when the request is sent.
+export function toMultipartBody(fields: IDataObject, attachment?: PushoverAttachment): FormData {
 	const form = new FormData();
 	for (const [name, value] of Object.entries(fields)) {
 		if (value === undefined || value === null) continue;
@@ -47,9 +38,16 @@ export function toMultipartBody(
 			attachment.fileName || 'attachment',
 		);
 	}
-	form.append('token', token);
 	return form;
 }
+
+// Errors after which every further request from this account is rejected
+// too, so sending the remaining items would only add failed requests. Pushover
+// temporarily blocks IPs that send many failing requests within minutes.
+const accountLevelErrors = new WeakSet<object>();
+
+export const isAccountLevelError = (error: unknown): boolean =>
+	typeof error === 'object' && error !== null && accountLevelErrors.has(error);
 
 async function request(
 	ctx: PushoverContext,
@@ -90,18 +88,26 @@ async function request(
 	if (response.statusCode >= 200 && response.statusCode < 300) {
 		return (isJsonObject ? payload : {}) as IDataObject;
 	}
-	throw new NodeApiError(ctx.getNode(), (isJsonObject ? payload : {}) as JsonObject, {
+	const errorBody = (isJsonObject ? payload : {}) as JsonObject;
+	const error = new NodeApiError(ctx.getNode(), errorBody, {
 		httpCode: String(response.statusCode),
 	});
+	// 429: the account is over its monthly message quota, and Pushover rejects
+	// every message until the quota resets. 401/403 or `"token": "invalid"`
+	// (the same shape as Pushover's documented `"user": "invalid"`): the
+	// application token itself was refused.
+	if ([401, 403, 429].includes(response.statusCode) || errorBody.token === 'invalid') {
+		accountLevelErrors.add(error);
+	}
+	throw error;
 }
 
 export async function sendMessage(
 	ctx: IExecuteFunctions,
 	fields: IDataObject,
-	token: string,
 	attachment?: PushoverAttachment,
 ): Promise<IDataObject> {
-	return await request(ctx, 'POST', '/messages.json', toMultipartBody(fields, token, attachment));
+	return await request(ctx, 'POST', '/messages.json', toMultipartBody(fields, attachment));
 }
 
 export async function listSounds(ctx: ILoadOptionsFunctions): Promise<Record<string, string>> {

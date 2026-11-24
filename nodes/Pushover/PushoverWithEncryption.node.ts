@@ -10,20 +10,28 @@ import type {
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
-import { encryptField, PushoverEncryptionError } from './encryption';
+import { encryptField, isValidKeyHex } from './encryption';
 import type { PushoverAttachment } from './pushoverClient';
-import { CREDENTIAL_NAME, listSounds, sendMessage } from './pushoverClient';
+import { CREDENTIAL_NAME, isAccountLevelError, listSounds, sendMessage } from './pushoverClient';
 
-// Fields whose plaintext can be replaced with a Pushover-encrypted ciphertext
-// before the request leaves this node. Attachments are explicitly not in this
-// set: Pushover's encryption spec covers text form fields only.
+// The text fields Pushover's end-to-end encryption covers
+// (https://pushover.net/api#e2ee). Everything else, attachments included,
+// always travels in plaintext.
 const ENCRYPTABLE_FIELDS = ['message', 'title', 'url', 'url_title'] as const;
 type EncryptableField = (typeof ENCRYPTABLE_FIELDS)[number];
 
-// `encryptFields` can be set from an expression, so treat it as untrusted:
-// only the four text fields above may ever be replaced with ciphertext.
 const isEncryptableField = (value: unknown): value is EncryptableField =>
 	(ENCRYPTABLE_FIELDS as readonly unknown[]).includes(value);
+
+// Optional text fields copied from the 'Optional Fields' collection. The
+// collection is read through this list, never merged wholesale, so a crafted
+// workflow cannot inject or override other form fields (user, encrypted, …).
+const OPTIONAL_TEXT_FIELDS = ['device', 'sound', 'title', 'url', 'url_title'] as const;
+
+// Sent, encrypted, as the title of an encrypted message that has none. Left
+// empty, Pushover would fill in the application name in plaintext, which the
+// apps then try, and fail, to decrypt.
+const ENCRYPTED_TITLE_FALLBACK = 'n8n';
 
 interface PushoverCredentials {
 	apiKey: string;
@@ -55,9 +63,11 @@ export class PushoverWithEncryption implements INodeType {
 		icon: { light: 'file:../../icons/pushover.svg', dark: 'file:../../icons/pushover.svg' },
 		group: ['output'],
 		version: 1,
-		subtitle: '={{$parameter["operation"]}}',
+		// Shows on the canvas whether the node encrypts, without opening it.
+		subtitle:
+			'={{ ($parameter["encryptFields"] || []).length ? "Send encrypted message" : "Send message (not encrypted)" }}',
 		description:
-			'Send Pushover notifications with optional client-side AES-256-CBC + HMAC-SHA256 field encryption',
+			'Send Pushover notifications with optional end-to-end encryption (AES-256-CBC + HMAC-SHA256)',
 		defaults: {
 			name: 'Pushover (with Encryption)',
 		},
@@ -92,7 +102,9 @@ export class PushoverWithEncryption implements INodeType {
 				required: true,
 				typeOptions: { password: true },
 				default: '',
-				description: 'Recipient key from the Pushover dashboard (often referred to as USER_KEY)',
+				placeholder: 'e.g. uQiRzpo4DXghDmr9QzzfQu27cmVRsG',
+				description:
+					'Key of the recipient user or group, from the Pushover dashboard. It is never encrypted: Pushover needs it to deliver the message.',
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -106,7 +118,7 @@ export class PushoverWithEncryption implements INodeType {
 				typeOptions: { rows: 3 },
 				required: true,
 				default: '',
-				description: 'Notification body. Pushover limits the plaintext to 1024 UTF-8 characters.',
+				description: 'Text of the notification, up to 1024 characters',
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -133,7 +145,8 @@ export class PushoverWithEncryption implements INodeType {
 				typeOptions: { minValue: 30 },
 				required: true,
 				default: 30,
-				description: 'For Emergency priority: how often Pushover re-sends until acknowledged',
+				description:
+					'How often Pushover repeats the notification until it is acknowledged (at least 30)',
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -149,7 +162,7 @@ export class PushoverWithEncryption implements INodeType {
 				required: true,
 				default: 1800,
 				description:
-					'For Emergency priority: how long retries continue before giving up (max 10800)',
+					'How long Pushover keeps repeating an unacknowledged notification (at most 10800, 3 hours)',
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -169,7 +182,8 @@ export class PushoverWithEncryption implements INodeType {
 				],
 				default: ['message', 'title', 'url', 'url_title'],
 				description:
-					'Per-field encryption toggles. All four default to ON. Deselect any field you want delivered as plaintext (e.g. keep Title plaintext for a lockscreen preview). Requires the Encryption Key to be set in the credential.',
+					"Fields to encrypt end-to-end with the credential's Encryption Key. Pushover treats the message, title, URL and URL title of an encrypted message as encrypted, so keep all four selected: a field sent in plaintext next to encrypted ones may not display correctly. Deselect all four to send an unencrypted message.",
+				hint: "Uses the credential's 'Encryption Key (Hex)'. All other fields and attachments are sent unencrypted.",
 				displayOptions: {
 					show: {
 						operation: ['sendMessage'],
@@ -190,6 +204,7 @@ export class PushoverWithEncryption implements INodeType {
 						type: 'fixedCollection',
 						typeOptions: { multipleValues: false },
 						default: {},
+						description: 'An image to attach. Attachments are not encrypted.',
 						options: [
 							{
 								name: 'attachment',
@@ -211,15 +226,16 @@ export class PushoverWithEncryption implements INodeType {
 						name: 'device',
 						type: 'string',
 						default: '',
+						placeholder: 'e.g. iphone,desktop',
 						description:
-							"Limit delivery to specific device name(s). Comma-separated for multiple. Omit to send to all of the user's devices.",
+							"Name of the device to deliver to, or several names separated by commas. Leave empty to send to all of the user's devices.",
 					},
 					{
 						displayName: 'HTML Formatting',
 						name: 'html',
 						type: 'boolean',
 						default: false,
-						description: 'Whether the message body uses HTML formatting',
+						description: 'Whether to format the message with HTML tags',
 					},
 					{
 						displayName: 'Sound Name or ID',
@@ -236,36 +252,39 @@ export class PushoverWithEncryption implements INodeType {
 						type: 'dateTime',
 						default: '',
 						description:
-							'Unix timestamp Pushover should display for the message, instead of receipt time',
+							'Date and time to show for the message instead of the time Pushover received it. Expressions may also return a Unix timestamp in seconds.',
 					},
 					{
 						displayName: 'Title',
 						name: 'title',
 						type: 'string',
 						default: '',
-						description: 'Optional title. Falls back to the application name if omitted.',
+						description:
+							'Title shown above the message, up to 250 characters. When empty, Pushover shows the application name; an encrypted message gets an encrypted "n8n" title instead.',
 					},
 					{
 						displayName: 'TTL (Seconds)',
 						name: 'ttl',
 						type: 'number',
+						typeOptions: { minValue: 0 },
 						default: 0,
 						description:
-							'After this many seconds the message is auto-deleted from devices. 0 = never.',
+							'Seconds after which the message is deleted from the devices. 0 keeps it until the user deletes it.',
 					},
 					{
 						displayName: 'URL',
 						name: 'url',
 						type: 'string',
 						default: '',
-						description: 'Supplementary URL shown alongside the message',
+						placeholder: 'e.g. https://example.com',
+						description: 'A link to show with the message, up to 512 characters',
 					},
 					{
 						displayName: 'URL Title',
 						name: 'url_title',
 						type: 'string',
 						default: '',
-						description: 'Display text for the supplementary URL',
+						description: 'Text to show for the link instead of the URL, up to 100 characters',
 					},
 				],
 				displayOptions: {
@@ -289,29 +308,45 @@ export class PushoverWithEncryption implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const out: INodeExecutionData[] = [];
+		// Set once Pushover refuses the account itself (invalid token, quota
+		// used up). Every later request would be refused too, so the remaining
+		// items are reported without contacting Pushover again.
+		let accountRefusal: { item: number; error: NodeApiError } | undefined;
+
+		const pushError = (i: number, error: string, description?: string | null) => {
+			const json: IDataObject = description ? { error, description } : { error };
+			out.push(
+				...this.helpers.constructExecutionMetaData(this.helpers.returnJsonArray(json), {
+					itemData: { item: i },
+				}),
+			);
+		};
 
 		for (let i = 0; i < items.length; i++) {
-			try {
-				const credentials = await this.getCredentials<PushoverCredentials>(CREDENTIAL_NAME, i);
-				const { fields, attachment } = await buildMessage(this, i, credentials);
-				const response = await sendMessage(this, fields, credentials.apiKey, attachment);
-				const meta = this.helpers.constructExecutionMetaData(
-					this.helpers.returnJsonArray(response),
-					{
-						itemData: { item: i },
-					},
+			if (accountRefusal) {
+				const { item, error } = accountRefusal;
+				pushError(
+					i,
+					`Not sent: Pushover refused item ${item} for the whole account (${error.message})`,
+					`${error.description ? `${error.description.replace(/\.$/, '')}. ` : ''}Pushover refuses every message from this account until this is fixed, so the node stopped sending; repeated refused requests can get the n8n server's IP address blocked temporarily.`,
 				);
-				out.push(...meta);
+				continue;
+			}
+			try {
+				const { fields, attachment } = await buildMessage(this, i);
+				const response = await sendMessage(this, fields, attachment);
+				out.push(
+					...this.helpers.constructExecutionMetaData(this.helpers.returnJsonArray(response), {
+						itemData: { item: i },
+					}),
+				);
 			} catch (error) {
-				if (this.continueOnFail()) {
-					const meta = this.helpers.constructExecutionMetaData(
-						this.helpers.returnJsonArray({ error: (error as Error).message }),
-						{ itemData: { item: i } },
-					);
-					out.push(...meta);
-					continue;
+				const nodeError = toNodeError(this.getNode(), error, i);
+				if (!this.continueOnFail()) throw nodeError;
+				if (nodeError instanceof NodeApiError && isAccountLevelError(nodeError)) {
+					accountRefusal = { item: i, error: nodeError };
 				}
-				throw toNodeError(this.getNode(), error, i);
+				pushError(i, nodeError.message, nodeError.description);
 			}
 		}
 
@@ -331,122 +366,189 @@ function toNodeError(node: INode, error: unknown, itemIndex: number) {
 	return new NodeOperationError(node, error as Error, { itemIndex });
 }
 
-async function buildMessage(
-	ctx: IExecuteFunctions,
-	i: number,
-	credentials: PushoverCredentials,
-): Promise<PushoverMessage> {
-	const userKey = ctx.getNodeParameter('userKey', i) as string;
-	const message = ctx.getNodeParameter('message', i) as string;
-	const priority = ctx.getNodeParameter('priority', i) as number;
-	const encryptFields = (ctx.getNodeParameter('encryptFields', i, []) as unknown[]).filter(
-		isEncryptableField,
-	);
+// 'Encrypt Fields' can be set from an expression, or by an AI agent when the
+// node runs as a tool, so its value is untrusted. Anything that is not one of
+// the four field names fails the item: dropping it silently would send a
+// field the user asked to encrypt in plaintext.
+function parseEncryptFields(raw: unknown, node: INode, itemIndex: number): EncryptableField[] {
+	const list: unknown[] = Array.isArray(raw)
+		? raw
+		: typeof raw === 'string'
+			? raw.split(',')
+			: raw === undefined || raw === null
+				? []
+				: [raw];
+	const values = list
+		.map((value) => (typeof value === 'string' ? value.trim() : value))
+		.filter((value) => value !== '');
+	const unsupported = values.filter((value) => !isEncryptableField(value));
+	if (unsupported.length > 0) {
+		throw new NodeOperationError(
+			node,
+			`'Encrypt Fields' contains unsupported values: ${unsupported.map((v) => JSON.stringify(v)).join(', ')}`,
+			{
+				itemIndex,
+				description: `Use only ${ENCRYPTABLE_FIELDS.map((f) => `'${f}'`).join(', ')}. Nothing was sent.`,
+			},
+		);
+	}
+	return [...new Set(values as EncryptableField[])];
+}
+
+// Pushover's `timestamp` is a Unix epoch in *seconds*, but n8n's dateTime
+// parameter resolves to an ISO-8601 string (and expressions can yield a
+// Luxon DateTime). A bare number or all-digit string is already a Unix value;
+// anything else is parsed as a date. Empty → no timestamp.
+function toUnixSeconds(raw: unknown, node: INode, itemIndex: number): number | undefined {
+	if (raw === '' || raw === undefined || raw === null) return undefined;
+	if (typeof raw === 'number') return Math.floor(raw);
+	if (/^\d+$/.test(String(raw))) return Number(raw);
+	const ms = Date.parse(String(raw));
+	if (Number.isNaN(ms)) {
+		throw new NodeOperationError(node, `'Timestamp' is not a valid date: "${String(raw)}"`, {
+			itemIndex,
+			description: 'Use a date and time, an ISO 8601 string, or a Unix timestamp in seconds.',
+		});
+	}
+	return Math.floor(ms / 1000);
+}
+
+async function buildMessage(ctx: IExecuteFunctions, i: number): Promise<PushoverMessage> {
+	const node = ctx.getNode();
+	// Read first: an unusable value must stop the item before anything else.
+	const encryptFields = parseEncryptFields(ctx.getNodeParameter('encryptFields', i, []), node, i);
+	const userKey = String(ctx.getNodeParameter('userKey', i) ?? '').trim();
+	const message = ctx.getNodeParameter('message', i);
+	const priority = Number(ctx.getNodeParameter('priority', i));
 	const optionalFields = ctx.getNodeParameter('optionalFields', i, {}) as IDataObject;
 
-	const body: IDataObject = {
-		user: userKey,
-		message,
-		priority,
-	};
+	// Pushover rejects these anyway, but every rejected request counts towards
+	// its temporary IP block, so catch them before sending.
+	if (message === undefined || message === null || String(message) === '') {
+		throw new NodeOperationError(node, "'Message' is empty", {
+			itemIndex: i,
+			description: 'Pushover requires a message. Check the expression that sets it.',
+		});
+	}
+	if (!Number.isInteger(priority) || priority < -2 || priority > 2) {
+		throw new NodeOperationError(node, `'Priority' must be -2, -1, 0, 1 or 2`, {
+			itemIndex: i,
+			description: `Received ${JSON.stringify(ctx.getNodeParameter('priority', i))}.`,
+		});
+	}
+
+	// Values that are not strings (a number from an expression, say) are
+	// stringified now, so that they are encrypted like any other text.
+	const body: IDataObject = { user: userKey, message: String(message), priority };
 
 	if (priority === 2) {
-		body.retry = ctx.getNodeParameter('retry', i) as number;
-		body.expire = ctx.getNodeParameter('expire', i) as number;
+		body.retry = Number(ctx.getNodeParameter('retry', i));
+		body.expire = Number(ctx.getNodeParameter('expire', i));
 	}
 
-	// Promote optional fields up to top-level keys, applying the HTML
-	// boolean → '1' conversion Pushover expects. We omit the field entirely
-	// when false so we don't ship an empty `html=""` form value.
+	for (const name of OPTIONAL_TEXT_FIELDS) {
+		const value = optionalFields[name];
+		if (value !== undefined && value !== null && String(value) !== '') {
+			body[name] = String(value);
+		}
+	}
+
+	// Pushover expects `html=1`; leave the field out entirely when off.
 	if (optionalFields.html === true) {
-		optionalFields.html = '1';
-	} else {
-		delete optionalFields.html;
+		body.html = '1';
 	}
 
-	// Pushover's `timestamp` is a Unix epoch in *seconds*, but n8n's dateTime
-	// parameter resolves to an ISO-8601 string (and expressions can yield a
-	// Luxon DateTime). Sending that string makes Pushover reject or ignore the
-	// value, so coerce it here. A bare number or all-digit string is already a
-	// Unix value; anything else is parsed as a date. Empty → drop the field.
-	if ('timestamp' in optionalFields) {
-		const raw = optionalFields.timestamp;
-		if (raw === '' || raw == null) {
-			delete optionalFields.timestamp;
-		} else if (typeof raw === 'number') {
-			optionalFields.timestamp = Math.floor(raw);
-		} else if (/^\d+$/.test(String(raw))) {
-			optionalFields.timestamp = Number(raw);
-		} else {
-			const ms = Date.parse(String(raw));
-			if (Number.isNaN(ms)) {
-				throw new NodeOperationError(
-					ctx.getNode(),
-					`Timestamp "${String(raw)}" is not a valid date or Unix timestamp`,
-					{ itemIndex: i },
-				);
-			}
-			optionalFields.timestamp = Math.floor(ms / 1000);
+	const timestamp = toUnixSeconds(optionalFields.timestamp, node, i);
+	if (timestamp !== undefined) {
+		body.timestamp = timestamp;
+	}
+
+	// 0 (the default) means "keep the message", so send no TTL at all. An
+	// unusable value fails the item rather than silently keeping a message
+	// that was meant to disappear.
+	const rawTtl = optionalFields.ttl;
+	if (rawTtl !== undefined && rawTtl !== null && rawTtl !== '') {
+		const ttl = Number(rawTtl);
+		if (!Number.isFinite(ttl) || ttl < 0) {
+			throw new NodeOperationError(node, `'TTL (Seconds)' is not a valid duration`, {
+				itemIndex: i,
+				description: `Use a positive number of seconds, or 0 to keep the message. Received ${JSON.stringify(rawTtl)}.`,
+			});
+		}
+		if (ttl > 0) {
+			body.ttl = Math.floor(ttl);
 		}
 	}
 
-	Object.assign(body, optionalFields);
-
-	// Attachment lives in a fixedCollection wrapper; unwrap it into the binary
-	// file part Pushover expects as `attachment`.
+	// The attachment lives in a fixedCollection wrapper; unwrap it into the
+	// binary file part Pushover expects as `attachment`.
 	let attachment: PushoverAttachment | undefined;
-	if (body.attachmentsUi) {
-		const wrap = (body.attachmentsUi as IDataObject).attachment as IDataObject | undefined;
-		if (wrap?.binaryPropertyName) {
-			const propName = wrap.binaryPropertyName as string;
-			const binaryMeta = ctx.helpers.assertBinaryData(i, propName);
-			attachment = {
-				data: await ctx.helpers.getBinaryDataBuffer(i, propName),
-				fileName: binaryMeta.fileName,
-				mimeType: binaryMeta.mimeType,
-			};
-		}
-		delete body.attachmentsUi;
+	const wrap = (optionalFields.attachmentsUi as IDataObject | undefined)?.attachment as
+		IDataObject | undefined;
+	if (wrap?.binaryPropertyName) {
+		const propName = String(wrap.binaryPropertyName);
+		const binaryMeta = ctx.helpers.assertBinaryData(i, propName);
+		attachment = {
+			data: await ctx.helpers.getBinaryDataBuffer(i, propName),
+			fileName: binaryMeta.fileName,
+			mimeType: binaryMeta.mimeType,
+		};
 	}
 
-	// Encryption is applied last so it sees the final plaintext for every
-	// field, including ones merged from optionalFields.
+	// Encryption runs last, on the final plaintext of every field. The
+	// credential is only read when there is something to encrypt.
 	if (encryptFields.length > 0) {
-		const keyHex = credentials.encryptionKey?.trim();
-		if (!keyHex) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				'Encrypt Fields is non-empty but no Encryption Key is set on the credential. Either set a 64-character hex key, or deselect all fields under Encrypt Fields to send plaintext.',
-				{ itemIndex: i },
-			);
-		}
-		// Skip fields that aren't present or are empty — sending an empty
-		// plaintext value alongside encrypted=1 confuses receiving devices
-		// (they try to decrypt the empty string and produce garbage).
-		let anyEncrypted = false;
-		for (const field of encryptFields) {
-			const value = body[field];
-			if (typeof value === 'string' && value.length > 0) {
-				try {
-					body[field] = await encryptField(value, keyHex);
-					anyEncrypted = true;
-				} catch (error) {
-					const msg =
-						error instanceof PushoverEncryptionError
-							? error.message
-							: 'Unexpected error during field encryption';
-					throw new NodeOperationError(ctx.getNode(), msg, { itemIndex: i });
-				}
-			} else if (typeof value === 'string' && value.length === 0) {
-				delete body[field];
-			}
-		}
-		// Only flip the encrypted flag if we actually produced ciphertext —
-		// otherwise we'd tell Pushover to treat plaintext fields as encrypted.
-		if (anyEncrypted) {
-			body.encrypted = '1';
-		}
+		await encryptMessage(ctx, i, body, encryptFields);
 	}
 
 	return { fields: body, attachment };
+}
+
+async function encryptMessage(
+	ctx: IExecuteFunctions,
+	i: number,
+	body: IDataObject,
+	encryptFields: EncryptableField[],
+): Promise<void> {
+	const node = ctx.getNode();
+	const credentials = await ctx.getCredentials<PushoverCredentials>(CREDENTIAL_NAME, i);
+	const keyHex = String(credentials.encryptionKey ?? '').trim();
+	if (!keyHex) {
+		throw new NodeOperationError(node, 'The credential has no encryption key', {
+			itemIndex: i,
+			description:
+				"'Encrypt Fields' selects fields to encrypt, but 'Encryption Key (Hex)' is empty in the credential. Add the 64-character key, or deselect all fields under 'Encrypt Fields' to send the message unencrypted. Nothing was sent.",
+		});
+	}
+	if (!isValidKeyHex(keyHex)) {
+		throw new NodeOperationError(node, "The credential's encryption key is not valid", {
+			itemIndex: i,
+			description:
+				"'Encryption Key (Hex)' must be exactly 64 hexadecimal characters (256 bits), for example the output of: openssl rand -hex 32. Nothing was sent.",
+		});
+	}
+
+	if (encryptFields.includes('title') && body.title === undefined) {
+		body.title = ENCRYPTED_TITLE_FALLBACK;
+	}
+
+	// Empty and missing fields are not in the body, so there is nothing to
+	// encrypt for them (an encrypted message must not carry empty plaintext).
+	const present = encryptFields.filter((field) => typeof body[field] === 'string');
+	try {
+		const ciphertexts = await Promise.all(
+			present.map(async (field) => await encryptField(body[field] as string, keyHex)),
+		);
+		present.forEach((field, k) => (body[field] = ciphertexts[k]));
+	} catch (error) {
+		throw new NodeOperationError(node, 'The message could not be encrypted', {
+			itemIndex: i,
+			description: `${(error as Error).message}. Nothing was sent.`,
+		});
+	}
+	// Only flag the message once ciphertext was actually produced, so that
+	// Pushover's apps never try to decrypt plaintext.
+	if (present.length > 0) {
+		body.encrypted = '1';
+	}
 }
