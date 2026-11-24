@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Supply-chain hygiene: wait before proposing a freshly published
+    # version, so that a compromised release has time to be caught and
+    # pulled. Security updates are not delayed.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
       dev-dependencies:
         dependency-type: development
@@ -13,9 +19,6 @@ updates:
       # TypeScript < 6.1 and ts-jest supports < 7. Lift once both support it.
       - dependency-name: typescript
         versions: ['>=6.1.0']
-      # @n8n/node-cli's lint config and n8n's lint plugin target ESLint 9.
-      - dependency-name: eslint
-        versions: ['>=10']
       # Node.js types follow the lowest Node.js version in "engines".
       - dependency-name: '@types/node'
         update-types: ['version-update:semver-major']
@@ -24,6 +27,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ['*']

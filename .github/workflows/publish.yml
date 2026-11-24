@@ -57,7 +57,9 @@ jobs:
           node-version: 'lts/*'
           # No dependency cache in release builds.
           package-manager-cache: false
-      - run: npm ci
+      # This job can mint an npm publishing token (id-token: write), so no
+      # dependency install script may run in it.
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - name: Publish with provenance

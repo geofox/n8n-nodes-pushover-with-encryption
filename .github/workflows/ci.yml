@@ -36,7 +36,10 @@ jobs:
       # 22 bundles npm 10, which rejects some npm 11 lockfiles in `npm ci`.
       - if: matrix.node == '22.x'
         run: npm install --global npm@11
-      - run: npm ci
+      # No dependency install scripts: nothing here needs a native build
+      # (n8n-workflow's isolated-vm is unused by the tests), and it removes
+      # one way for a compromised dependency to run code at install time.
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
@@ -56,11 +59,10 @@ jobs:
         with:
           node-version: 'lts/*'
           cache: npm
-      - run: npm ci
-      # Not plain ^2: n8n-workflow's stale `latest` dist-tag (2.16.0) satisfies
-      # ^2, so npm would install that old release, whose isolated-vm 6.x does
-      # not build on current Node.js. ^2.47.2 resolves to the newest 2.x.
-      - run: npm install --no-save 'n8n-workflow@^2.47.2'
+      - run: npm ci --ignore-scripts
+      # The floor keeps npm from settling on an old 2.x release should the
+      # `latest` dist-tag lag behind again (it once pointed at 2.16.0).
+      - run: npm install --no-save --ignore-scripts 'n8n-workflow@^2.49.3'
       # `npm ls` would flag the swapped-in 2.x as outside the declared
       # ^3 range, so check the installed version directly instead.
       - name: Confirm n8n-workflow 2.x is installed
